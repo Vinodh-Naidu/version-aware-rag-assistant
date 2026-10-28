@@ -1,3 +1,4 @@
+
 .venv/
 __pycache__/
 .pytest_cache/
@@ -6,3 +7,7 @@ __pycache__/
 !.env.example
 *.py[cod]
 .DS_Store
+
+# Local document database and uploaded content
+data/*
+!data/.gitkeep
