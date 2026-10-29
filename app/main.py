@@ -1,6 +1,7 @@
-
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field
 
+from app.answer import AnswerGenerationError, generate_answer
 from app.ingestion import (
     DocumentError,
     MAX_FILE_SIZE,
@@ -11,6 +12,7 @@ from app.storage import (
     list_documents,
     upsert_document,
 )
+from app.vector_store import search_chunks, sync_document
 
 app = FastAPI(
     title="VersionAware RAG Assistant",
@@ -38,7 +40,22 @@ async def upload_document(file: UploadFile = File(...)):
         processed = process_document(filename, content)
         result = upsert_document(processed)
 
-        return result
+        # Always sync, even for identical uploads, so a previously
+        # interrupted indexing operation can be retried.
+        stored_document = get_document(result["document_id"])
+
+        if stored_document is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Document metadata was saved but could not be read.",
+            )
+
+        index_result = sync_document(stored_document)
+
+        return {
+            **result,
+            "indexed_chunks": index_result["indexed_chunks"],
+        }
 
     except DocumentError as exc:
         raise HTTPException(
@@ -72,3 +89,53 @@ def document_details(document_id: str):
         )
 
     return document
+
+
+class RetrievalRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=3, ge=1, le=10)
+
+
+@app.post("/api/retrieve")
+def retrieve(request: RetrievalRequest):
+    try:
+        matches = search_chunks(
+            question=request.question,
+            top_k=request.top_k,
+        )
+
+        return {
+            "question": request.question,
+            "retrieved_count": len(matches),
+            "results": matches,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+class AnswerRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=3, ge=1, le=10)
+
+
+@app.post("/api/answer")
+def answer_question(request: AnswerRequest):
+    try:
+        return generate_answer(
+            question=request.question,
+            top_k=request.top_k,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+    except AnswerGenerationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
