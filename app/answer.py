@@ -3,11 +3,11 @@ import os
 import re
 import ollama
 
+from app.storage import get_document
 from app.vector_store import search_chunks
 
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
-# Starting value only. Calibrate against your own questions and documents.
 MAX_COSINE_DISTANCE = float(
     os.getenv("RAG_MAX_COSINE_DISTANCE", "0.65")
 )
@@ -26,7 +26,6 @@ def generate_answer(question: str, top_k: int = 3) -> dict:
 
     matches = search_chunks(question=question, top_k=top_k)
 
-    # Fail closed when retrieval provides no evidence.
     if not matches:
         return {
             "answer": ABSTENTION,
@@ -34,8 +33,6 @@ def generate_answer(question: str, top_k: int = 3) -> dict:
             "citations": [],
         }
 
-    # Chroma's cosine distance is lower for more similar vectors.
-    # This threshold is a starting point, not a universal relevance rule.
     best_distance = min(item["distance"] for item in matches)
     if best_distance > MAX_COSINE_DISTANCE:
         return {
@@ -44,7 +41,6 @@ def generate_answer(question: str, top_k: int = 3) -> dict:
             "citations": [],
         }
 
-    # Give each retrieved chunk an internal source ID.
     source_map = {}
     evidence_blocks = []
 
@@ -104,7 +100,6 @@ For an unsupported question, set abstain to true and citation_ids to [].
         )
         raw_content = response.message.content
     except Exception as exc:
-        # Keep model/server details out of the public API response.
         raise AnswerGenerationError(
             "Local answer generation is unavailable. Check that Ollama "
             "is running and the configured model is installed."
@@ -131,7 +126,6 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "The model response failed validation."
         )
 
-    # Do not accept citations that were not present in the retrieved evidence.
     if any(source_id not in source_map for source_id in citation_ids):
         raise AnswerGenerationError(
             "The model returned an unknown citation ID."
@@ -144,7 +138,6 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "citations": [],
         }
 
-    # A non-abstaining answer must cite at least one retrieved source.
     if not citation_ids:
         return {
             "answer": ABSTENTION,
@@ -152,7 +145,6 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "citations": [],
         }
 
-    # Ensure inline source references correspond to validated citations.
     inline_ids = set(re.findall(r"\[(S\d+)\]", answer))
 
     for source_id in inline_ids:
@@ -186,6 +178,18 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "end_char": item["end_char"],
             "excerpt": item["text"],
         })
+
+    for citation in citations:
+        doc_id = citation.get("document_id")
+        if doc_id:
+            current_document = get_document(doc_id)
+            if current_document is not None:
+                if current_document.get("current_version") != citation.get("document_version"):
+                    return {
+                        "answer": ABSTENTION,
+                        "abstained": True,
+                        "citations": [],
+                    }
 
     return {
         "answer": answer.strip(),

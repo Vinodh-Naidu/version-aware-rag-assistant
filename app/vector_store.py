@@ -1,9 +1,10 @@
 from functools import lru_cache
 from pathlib import Path
-
 import chromadb
 import numpy as np
 from sentence_transformers import SentenceTransformer
+
+from app.storage import get_document
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -35,6 +36,9 @@ def sync_document(document: dict) -> dict:
     version = document["current_version"]
     chunks = document["chunks"]
 
+    texts = [chunk["text"] for chunk in chunks]
+
+    # Remove chunks from previous versions before adding the current set.
     collection.delete(where={"document_id": document_id})
 
     if not chunks:
@@ -44,18 +48,16 @@ def sync_document(document: dict) -> dict:
             "indexed_chunks": 0,
         }
 
-    texts = [chunk["text"] for chunk in chunks]
-
-    raw_embeddings = get_embedding_model().encode(
+    embeddings_raw = get_embedding_model().encode(
         texts,
         normalize_embeddings=True,
         show_progress_bar=False,
     )
 
-    if hasattr(raw_embeddings, "tolist"):
-        embeddings = raw_embeddings.tolist()
+    if hasattr(embeddings_raw, "tolist"):
+        embeddings = embeddings_raw.tolist()
     else:
-        embeddings = np.array(raw_embeddings).tolist()
+        embeddings = np.array(embeddings_raw).tolist()
 
     ids = [chunk["chunk_id"] for chunk in chunks]
 
@@ -85,10 +87,7 @@ def sync_document(document: dict) -> dict:
     }
 
 
-def search_chunks(
-        question: str,
-        top_k: int = 3,
-) -> list[dict]:
+def search_chunks(question: str, top_k: int = 3) -> list[dict]:
     question = question.strip()
 
     if not question:
@@ -102,28 +101,44 @@ def search_chunks(
     if collection.count() == 0:
         return []
 
-    raw_query_embedding = get_embedding_model().encode(
+    query_embeddings_raw = get_embedding_model().encode(
         [question],
         normalize_embeddings=True,
         show_progress_bar=False,
     )
 
-    if hasattr(raw_query_embedding, "tolist"):
-        query_embedding = raw_query_embedding.tolist()
+    if hasattr(query_embeddings_raw, "tolist"):
+        query_embedding = query_embeddings_raw.tolist()
     else:
-        query_embedding = np.array(raw_query_embedding).tolist()
+        query_embedding = np.array(query_embeddings_raw).tolist()
+
+    candidate_count = min(top_k * 5, collection.count(), 50)
 
     results = collection.query(
         query_embeddings=query_embedding,
-        n_results=min(top_k, collection.count()),
+        n_results=candidate_count,
         include=["documents", "metadatas", "distances"],
     )
 
     matches = []
 
+    if not results.get("documents") or not results["documents"][0]:
+        return []
+
     for i, text in enumerate(results["documents"][0]):
         metadata = results["metadatas"][0][i]
         distance = results["distances"][0][i]
+
+        current_document = get_document(metadata["document_id"])
+
+        if current_document is None:
+            continue
+
+        if (
+                metadata["document_version"]
+                != current_document["current_version"]
+        ):
+            continue
 
         matches.append({
             "text": text,
@@ -135,5 +150,8 @@ def search_chunks(
             "end_char": metadata["end_char"],
             "distance": distance,
         })
+
+        if len(matches) >= top_k:
+            break
 
     return matches

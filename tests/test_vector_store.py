@@ -1,16 +1,12 @@
-
 from app import vector_store
 
 
 class FakeEmbeddings:
     def encode(self, texts, **kwargs):
-        # A deterministic two-dimensional embedding for unit tests.
         vectors = []
-
         for text in texts:
             value = sum(ord(c) for c in text) % 100
             vectors.append([float(value), 1.0])
-
         return vectors
 
 
@@ -19,13 +15,13 @@ class FakeCollection:
         self.records = {}
 
     def delete(self, where):
-        document_id = where["document_id"]
-
-        self.records = {
-            key: value
-            for key, value in self.records.items()
-            if value["metadata"]["document_id"] != document_id
-        }
+        document_id = where.get("document_id")
+        if document_id:
+            self.records = {
+                key: value
+                for key, value in self.records.items()
+                if value["metadata"]["document_id"] != document_id
+            }
 
     def add(self, ids, documents, embeddings, metadatas):
         for i, chunk_id in enumerate(ids):
@@ -39,9 +35,7 @@ class FakeCollection:
         return len(self.records)
 
     def query(self, query_embeddings, n_results, include):
-        # Simple deterministic ordering for this unit test.
         records = list(self.records.items())[:n_results]
-
         return {
             "documents": [[v["text"] for _, v in records]],
             "metadatas": [[v["metadata"] for _, v in records]],
@@ -52,12 +46,8 @@ class FakeCollection:
 def test_sync_replaces_old_document_version(monkeypatch):
     collection = FakeCollection()
 
-    monkeypatch.setattr(
-        vector_store, "get_collection", lambda: collection
-    )
-    monkeypatch.setattr(
-        vector_store, "get_embedding_model", lambda: FakeEmbeddings()
-    )
+    monkeypatch.setattr(vector_store, "get_collection", lambda: collection)
+    monkeypatch.setattr(vector_store, "get_embedding_model", lambda: FakeEmbeddings())
 
     old_document = {
         "document_id": "doc1",
@@ -89,20 +79,15 @@ def test_sync_replaces_old_document_version(monkeypatch):
     vector_store.sync_document(new_document)
 
     assert list(collection.records) == ["doc1:v2:0"]
-    assert collection.records["doc1:v2:0"]["metadata"][
-               "document_version"
-           ] == 2
+    assert collection.records["doc1:v2:0"]["metadata"]["document_version"] == 2
 
 
 def test_search_returns_source_citation(monkeypatch):
     collection = FakeCollection()
 
-    monkeypatch.setattr(
-        vector_store, "get_collection", lambda: collection
-    )
-    monkeypatch.setattr(
-        vector_store, "get_embedding_model", lambda: FakeEmbeddings()
-    )
+    monkeypatch.setattr(vector_store, "get_collection", lambda: collection)
+    monkeypatch.setattr(vector_store, "get_embedding_model", lambda: FakeEmbeddings())
+    monkeypatch.setattr(vector_store, "get_document", lambda doc_id: {"current_version": 1})
 
     document = {
         "document_id": "doc1",
