@@ -138,7 +138,7 @@ This helps prevent the application from returning answers based on outdated docu
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/version-aware-rag-assistant.git
+git clone https://github.com/Vinodh-Naidu/version-aware-rag-assistant.git
 
 cd version-aware-rag-assistant
 ```

@@ -13,3 +13,4 @@ data/*
 !data/.gitkeep
 travel-test-policy2.txt
 sample-policy2.txt
+.idea/
