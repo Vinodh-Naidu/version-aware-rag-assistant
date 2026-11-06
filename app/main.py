@@ -4,6 +4,12 @@ import uuid
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
+from app.logging_config import configure_logging
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi import Depends
+from app.security import require_api_key
 
 from app.answer import MODEL_NAME, AnswerGenerationError, generate_answer
 from app.answer_cache import (
@@ -25,11 +31,9 @@ from app.storage import (
 from app.vector_store import search_chunks, sync_document
 
 # --- Logging Configuration ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-logger = logging.getLogger("version_aware_rag")
+configure_logging()
+
+logger = logging.getLogger(__name__)
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -37,46 +41,6 @@ app = FastAPI(
     description="Document ingestion and version-aware knowledge management",
     version="0.2.0",
 )
-
-
-# --- Middleware ---
-@app.middleware("http")
-async def request_logging(request: Request, call_next):
-    request_id = str(uuid.uuid4())
-    request.state.request_id = request_id
-
-    started_at = time.perf_counter()
-
-    try:
-        response = await call_next(request)
-
-        duration_ms = round(
-            (time.perf_counter() - started_at) * 1000,
-            2,
-            )
-
-        logger.info(
-            "request_completed request_id=%s method=%s path=%s "
-            "status=%s duration_ms=%s",
-            request_id,
-            request.method,
-            request.url.path,
-            response.status_code,
-            duration_ms,
-        )
-
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-    except Exception:
-        logger.exception(
-            "request_failed request_id=%s method=%s path=%s",
-            request_id,
-            request.method,
-            request.url.path,
-        )
-        raise
-
 
 # --- Health Route ---
 @app.get("/api/health")
@@ -88,14 +52,32 @@ def health():
 
 
 # --- Document Ingestion & Storage Routes ---
-@app.post("/api/documents/upload", status_code=status.HTTP_201_CREATED)
+@app.post("/api/documents/upload", dependencies=[Depends(require_api_key)], status_code=status.HTTP_201_CREATED)
 async def upload_document(file: UploadFile = File(...)):
     filename = file.filename or ""
 
     try:
         # Read at most one byte above the configured limit.
-        content = await file.read(MAX_FILE_SIZE + 1)
+        # content = await file.read(MAX_FILE_SIZE + 1)
+        # upload supports 5 MB
 
+        MAX_UPLOAD_SIZE = 5 * 1024 * 1024
+
+        if not file.filename:
+            raise DocumentError("Filename is required.")
+
+        filename = file.filename
+
+        if filename.lower().endswith((".pdf", ".txt")) is False:
+            raise DocumentError("Only PDF and TXT files are supported.")
+
+        content = await file.read(MAX_UPLOAD_SIZE + 1)
+
+        if len(content) > MAX_UPLOAD_SIZE:
+            raise DocumentError("File exceeds the 5 MB upload limit.")
+
+        if not content:
+            raise DocumentError("Uploaded file is empty.")
         processed = process_document(filename, content)
         result = upsert_document(processed)
 
@@ -134,12 +116,12 @@ async def upload_document(file: UploadFile = File(...)):
         await file.close()
 
 
-@app.get("/api/documents")
+@app.get("/api/documents",dependencies=[Depends(require_api_key)])
 def documents():
     return {"documents": list_documents()}
 
 
-@app.get("/api/documents/{document_id}")
+@app.get("/api/documents/{document_id}",dependencies=[Depends(require_api_key)])
 def document_details(document_id: str):
     document = get_document(document_id)
 
@@ -158,7 +140,7 @@ class RetrievalRequest(BaseModel):
     top_k: int = Field(default=3, ge=1, le=10)
 
 
-@app.post("/api/retrieve")
+@app.post("/api/retrieve", dependencies=[Depends(require_api_key)])
 def retrieve(request: RetrievalRequest):
     try:
         matches = search_chunks(
@@ -184,7 +166,7 @@ class AnswerRequest(BaseModel):
     top_k: int = Field(default=3, ge=1, le=10)
 
 
-@app.post("/api/answer")
+@app.post("/api/answer", dependencies=[Depends(require_api_key)])
 def answer_question(payload: AnswerRequest, request: Request):
     try:
         cache_key = create_cache_key(
@@ -233,3 +215,162 @@ def answer_question(payload: AnswerRequest, request: Request):
             status_code=503,
             detail=str(exc),
         ) from exc
+
+#
+@app.middleware("http")
+async def request_logging_middleware(request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    start_time = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+
+        duration_ms = round(
+            (time.perf_counter() - start_time) * 1000,
+            2,
+            )
+
+        response.headers["X-Request-ID"] = request_id
+
+        logger.info(
+            "HTTP request completed",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+
+        return response
+
+    except Exception:
+        logger.exception(
+            "Unhandled exception during HTTP request",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+            },
+        )
+        raise
+
+
+def create_error_response(
+        request: Request,
+        status_code: int,
+        error_code: str,
+        message: str,
+) -> JSONResponse:
+    request_id = getattr(
+        request.state,
+        "request_id",
+        "unknown",
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": error_code,
+                "message": message,
+                "request_id": request_id,
+            }
+        },
+        headers={"X-Request-ID": request_id},
+    )
+
+
+@app.exception_handler(DocumentError)
+async def document_error_handler(
+        request: Request,
+        exc: DocumentError,
+):
+    return create_error_response(
+        request,
+        400,
+        "DOCUMENT_PROCESSING_ERROR",
+        str(exc),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(
+        request: Request,
+        exc: RequestValidationError,
+):
+    return create_error_response(
+        request,
+        422,
+        "VALIDATION_ERROR",
+        "The request contains invalid or missing fields.",
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(
+        request: Request,
+        exc: StarletteHTTPException,
+):
+    error_codes = {
+        400: "BAD_REQUEST",
+        401: "UNAUTHORIZED",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        405: "METHOD_NOT_ALLOWED",
+    }
+
+    # Do not expose arbitrary internal exception details.
+    messages = {
+        400: "The request could not be processed.",
+        401: "Authentication is required.",
+        403: "Access is forbidden.",
+        404: "The requested resource was not found.",
+        405: "The requested HTTP method is not allowed.",
+    }
+
+    error_code = error_codes.get(
+        exc.status_code,
+        "HTTP_ERROR",
+    )
+
+    message = messages.get(
+        exc.status_code,
+        "The request could not be completed.",
+    )
+
+    return create_error_response(
+        request,
+        exc.status_code,
+        error_code,
+        message,
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_exception_handler(
+        request: Request,
+        exc: Exception,
+):
+    logger.exception(
+        "Unexpected application error",
+        extra={
+            "request_id": getattr(
+                request.state,
+                "request_id",
+                "unknown",
+            ),
+            "method": request.method,
+            "path": request.url.path,
+        },
+    )
+
+    return create_error_response(
+        request,
+        500,
+        "INTERNAL_SERVER_ERROR",
+        "An unexpected server error occurred.",
+    )

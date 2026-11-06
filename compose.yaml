@@ -14,6 +14,7 @@ services:
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
       RAG_MAX_COSINE_DISTANCE: ${RAG_MAX_COSINE_DISTANCE:-0.65}
+      RAG_API_KEY: ${RAG_API_KEY:?Set RAG_API_KEY in your .env file}
 
     volumes:
       - ./data:/app/data

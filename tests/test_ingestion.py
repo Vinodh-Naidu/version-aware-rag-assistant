@@ -36,6 +36,7 @@ def upload_text(filename: str, text: str):
                 "text/plain",
             )
         },
+        headers={"X-API-Key": "test-secret-key",},
     )
 
 
