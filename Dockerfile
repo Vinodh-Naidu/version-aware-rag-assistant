@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV HF_HOME=/home/app/.cache/huggingface
+ENV HF_HOME=/home/appuser/.cache/huggingface
 
 WORKDIR /app
 
