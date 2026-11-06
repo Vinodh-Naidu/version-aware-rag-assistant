@@ -12,6 +12,13 @@ MAX_COSINE_DISTANCE = float(
     os.getenv("RAG_MAX_COSINE_DISTANCE", "0.65")
 )
 
+OLLAMA_HOST = os.getenv(
+    "OLLAMA_HOST",
+    "http://localhost:11434",
+)
+
+ollama_client = ollama.Client(host=OLLAMA_HOST)
+
 ABSTENTION = "I couldn't find sufficient evidence in the available documents to answer that question."
 
 
@@ -89,7 +96,7 @@ For an unsupported question, set abstain to true and citation_ids to [].
     )
 
     try:
-        response = ollama.chat(
+        response = ollama_client.chat(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": system_prompt},
