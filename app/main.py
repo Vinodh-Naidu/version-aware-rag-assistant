@@ -170,8 +170,8 @@ class AnswerRequest(BaseModel):
 def answer_question(payload: AnswerRequest, request: Request):
     try:
         cache_key = create_cache_key(
-            question=request.question,
-            top_k=request.top_k,
+            question=payload.question,
+            top_k=payload.top_k,
             model_name=MODEL_NAME,
         )
 
@@ -180,7 +180,7 @@ def answer_question(payload: AnswerRequest, request: Request):
 
         logger.info(
             "answer_cache_lookup request_id=%s cache_hit=%s",
-            getattr(request, "request_id", "unknown"),
+            getattr(request.state, "request_id", "unknown"),
             cached_answer is not None,
             )
 
@@ -189,8 +189,8 @@ def answer_question(payload: AnswerRequest, request: Request):
 
         # 2. Generate a fresh answer if the cache misses.
         result = generate_answer(
-            question=request.question,
-            top_k=request.top_k,
+            question=payload.question,
+            top_k=payload.top_k,
         )
 
         result["cache_hit"] = False
@@ -198,7 +198,7 @@ def answer_question(payload: AnswerRequest, request: Request):
         # 3. Cache only answers that have valid citations.
         save_cached_answer(
             cache_key=cache_key,
-            question=request.question,
+            question=payload.question,
             answer=result,
         )
 
@@ -216,7 +216,6 @@ def answer_question(payload: AnswerRequest, request: Request):
             detail=str(exc),
         ) from exc
 
-#
 @app.middleware("http")
 async def request_logging_middleware(request, call_next):
     request_id = str(uuid.uuid4())
@@ -224,47 +223,34 @@ async def request_logging_middleware(request, call_next):
 
     start_time = time.perf_counter()
 
-    try:
-        response = await call_next(request)
+    response = await call_next(request)
 
-        duration_ms = round(
-            (time.perf_counter() - start_time) * 1000,
-            2,
-            )
-
-        response.headers["X-Request-ID"] = request_id
-
-        logger.info(
-            "HTTP request completed",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "path": request.url.path,
-                "status_code": response.status_code,
-                "duration_ms": duration_ms,
-            },
+    duration_ms = round(
+        (time.perf_counter() - start_time) * 1000,
+        2,
         )
 
-        return response
+    response.headers["X-Request-ID"] = request_id
 
-    except Exception:
-        logger.exception(
-            "Unhandled exception during HTTP request",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "path": request.url.path,
-            },
-        )
-        raise
+    logger.info(
+        "HTTP request completed",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+        },
+    )
 
-
+    return response
 def create_error_response(
         request: Request,
         status_code: int,
         error_code: str,
         message: str,
 ) -> JSONResponse:
+
     request_id = getattr(
         request.state,
         "request_id",
@@ -280,10 +266,10 @@ def create_error_response(
                 "request_id": request_id,
             }
         },
-        headers={"X-Request-ID": request_id},
+        headers={
+            "X-Request-ID": request_id,
+        },
     )
-
-
 @app.exception_handler(DocumentError)
 async def document_error_handler(
         request: Request,

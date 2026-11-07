@@ -1,10 +1,13 @@
+
 import json
 import os
 import re
+
 import ollama
 
 from app.storage import get_document
 from app.vector_store import search_chunks
+
 
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
@@ -19,7 +22,10 @@ OLLAMA_HOST = os.getenv(
 
 ollama_client = ollama.Client(host=OLLAMA_HOST)
 
-ABSTENTION = "I couldn't find sufficient evidence in the available documents to answer that question."
+ABSTENTION = (
+    "I couldn't find sufficient evidence in the available documents "
+    "to answer that question."
+)
 
 
 class AnswerGenerationError(RuntimeError):
@@ -28,10 +34,14 @@ class AnswerGenerationError(RuntimeError):
 
 def generate_answer(question: str, top_k: int = 3) -> dict:
     question = question.strip()
+
     if not question:
         raise ValueError("Question cannot be empty.")
 
-    matches = search_chunks(question=question, top_k=top_k)
+    matches = search_chunks(
+        question=question,
+        top_k=top_k,
+    )
 
     if not matches:
         return {
@@ -41,6 +51,7 @@ def generate_answer(question: str, top_k: int = 3) -> dict:
         }
 
     best_distance = min(item["distance"] for item in matches)
+
     if best_distance > MAX_COSINE_DISTANCE:
         return {
             "answer": ABSTENTION,
@@ -48,12 +59,15 @@ def generate_answer(question: str, top_k: int = 3) -> dict:
             "citations": [],
         }
 
+    # Build source mapping and evidence for the LLM.
     source_map = {}
     evidence_blocks = []
 
     for index, item in enumerate(matches, start=1):
         source_id = f"S{index}"
+
         source_map[source_id] = item
+
         evidence_blocks.append(
             f"[{source_id}]\n"
             f"Filename: {item['source']}\n"
@@ -79,6 +93,7 @@ Rules:
 4. Never invent source IDs, filenames, versions, or quotations.
 5. If evidence conflicts, explain the conflict and cite both sources.
 6. Keep the answer concise.
+7. Always answer in a complete grammatical sentence, not a fragment.
 
 Return JSON only, with this shape:
 {
@@ -95,6 +110,7 @@ For an unsupported question, set abstain to true and citation_ids to [].
         f"Retrieved evidence:\n{evidence}"
     )
 
+    # Generate answer using Ollama.
     try:
         response = ollama_client.chat(
             model=MODEL_NAME,
@@ -105,18 +121,23 @@ For an unsupported question, set abstain to true and citation_ids to [].
             format="json",
             options={"temperature": 0},
         )
+
         raw_content = response.message.content
+
     except Exception as exc:
         raise AnswerGenerationError(
             "Local answer generation is unavailable. Check that Ollama "
             "is running and the configured model is installed."
         ) from exc
 
+    # Parse and validate the model response.
     try:
         generated = json.loads(raw_content)
+
         answer = generated.get("answer")
         citation_ids = generated.get("citation_ids")
         abstain = generated.get("abstain")
+
     except (json.JSONDecodeError, AttributeError, TypeError) as exc:
         raise AnswerGenerationError(
             "The model returned an invalid response format."
@@ -133,11 +154,13 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "The model response failed validation."
         )
 
+    # Reject unknown source IDs returned by the model.
     if any(source_id not in source_map for source_id in citation_ids):
         raise AnswerGenerationError(
             "The model returned an unknown citation ID."
         )
 
+    # Respect an explicit model abstention.
     if abstain:
         return {
             "answer": ABSTENTION,
@@ -145,6 +168,7 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "citations": [],
         }
 
+    # A supported answer must have at least one validated citation.
     if not citation_ids:
         return {
             "answer": ABSTENTION,
@@ -152,29 +176,44 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "citations": [],
         }
 
-    inline_ids = set(re.findall(r"\[(S\d+)\]", answer))
+    # Extract inline citations, preserving their original order.
+    inline_order = list(
+        dict.fromkeys(
+            re.findall(r"\[(S\d+)\]", answer)
+        )
+    )
 
+    inline_ids = set(inline_order)
+
+    # Reject unknown inline citations.
     for source_id in inline_ids:
         if source_id not in source_map:
             raise AnswerGenerationError(
                 "The answer contains an unknown inline citation."
             )
 
+    # If the model omitted inline citations, attach the first
+    # validated citation ID supplied by the model.
+    if not inline_ids:
+        primary_source_id = citation_ids[0]
+
+        answer = f"{answer.strip()} [{primary_source_id}]"
+
+        inline_order = [primary_source_id]
+        inline_ids = {primary_source_id}
+
+    # Inline citations must be included in the validated citation list.
     if not inline_ids.issubset(set(citation_ids)):
         raise AnswerGenerationError(
             "Inline citations do not match the validated citation list."
         )
 
-    if not inline_ids:
-        return {
-            "answer": ABSTENTION,
-            "abstained": True,
-            "citations": [],
-        }
-
+    # Build citations only for sources actually referenced inline.
     citations = []
-    for source_id in dict.fromkeys(citation_ids):
+
+    for source_id in inline_order:
         item = source_map[source_id]
+
         citations.append({
             "source_id": source_id,
             "filename": item["source"],
@@ -186,17 +225,22 @@ For an unsupported question, set abstain to true and citation_ids to [].
             "excerpt": item["text"],
         })
 
+    # Verify that cited documents still exist and have current versions.
     for citation in citations:
-        doc_id = citation.get("document_id")
-        if doc_id:
-            current_document = get_document(doc_id)
-            if current_document is not None:
-                if current_document.get("current_version") != citation.get("document_version"):
-                    return {
-                        "answer": ABSTENTION,
-                        "abstained": True,
-                        "citations": [],
-                    }
+        doc_id = citation["document_id"]
+
+        current_document = get_document(doc_id)
+
+        if (
+                current_document is None
+                or current_document.get("current_version")
+                != citation["document_version"]
+        ):
+            return {
+                "answer": ABSTENTION,
+                "abstained": True,
+                "citations": [],
+            }
 
     return {
         "answer": answer.strip(),
