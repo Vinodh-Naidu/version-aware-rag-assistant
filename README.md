@@ -469,7 +469,31 @@ Check the **Actions** tab in GitHub to view workflow results.
 - LLM answer quality depends on the selected Ollama model and retrieved evidence.
 - Large embedding and LLM models require additional memory and disk space.
 - Integration testing of the complete Docker workflow is not yet included in the test suite.
+## Application Screenshots
 
+### 1. Swagger API Documentation
+
+Explore the available REST API endpoints through FastAPI Swagger UI.
+
+![Swagger API Documentation](docs/images/01-swagger-api.png)
+
+### 2. Document Upload
+
+Upload PDF and TXT documents for processing, chunking, hashing, and indexing.
+
+![Document Upload](docs/images/02-upload-document.png)
+
+### 3. Semantic Document Retrieval
+
+Retrieve relevant document chunks using semantic similarity search, including source and version metadata.
+
+![Document Retrieval](docs/images/03-document-retrieval.png)
+
+### 4. AI-Generated Answer with Citations
+
+Generate grounded answers using the local LLM, with citations referencing the retrieved document evidence.
+
+![Generated Answer with Citations](docs/images/04.2-answer-with-citations.png)
 ## Future Enhancements
 
 - Improve multi-worker concurrency safety.
